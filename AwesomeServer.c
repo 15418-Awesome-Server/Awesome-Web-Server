@@ -202,7 +202,7 @@ void get_filetype(char *filename, char *filetype){
 		strcpy(filetype, "text/plain");
 }
 
-void serve_dynamic(int fd, char *filename, char * cgiargs){
+void serve_dynamic(int fd, char *filename, char *cgiargs){
 	char buf[MAXLINE], *emptylist= {NULL};
 
 	/* return 1st part of HTTP response */
