@@ -132,3 +132,103 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
 	Rio_writen(fd, buf, strlen(buf));
 	Rio_writen(fd, body, strlen(body));
 }
+
+void read_requestedhdrs(rio_t *rp){
+	char buf[MAXLINE];
+
+	/* TODO customize Rio_readlineb */
+	Rio_readlineb(rp, buf, MAXLINE);
+	while(strcmp(buf, "\r\n")){
+		Rio_readlineb(rp, buf, MAXLINE);
+		printf("%s", buf);
+		/* flush stream ??? */
+	}
+	return;
+}
+
+parse_uri(char *uri, char *filename, char *cgiargs){
+	char *ptr;
+
+	if(!strstr(uri, "cgi-bin")){ 	// Static Content
+		strcpy(cgiargs, "");
+		strcpy(filename, ".");
+		strcpy(filename, "uri");
+		if(uri[strlen(uri) - 1] == '/')
+			strcat(filename, "home.html");
+		return 1;
+	}else{							// Dynamic Content
+		ptr = index(uri, '?');
+		if(ptr){
+			strcpy(cgiargs, ptr+1);
+			*ptr = '\0';
+		}else
+			strcpy(cgiargs, "");
+		strcpy(filename, ".");
+		strcat(filename. uri);
+		return 0;
+	}
+}
+
+void serve_static(int fd, char *filename, int filesize){
+	int srcfd;
+	char *srcp, filetype[MAXLINE], buf[MAXLINE];
+
+	/* Send response headers to client */
+	get_filetype(filename, filetype);
+	sprintf(buf, "HTTP/1.0 200 OK\r\n");
+	sprintf(buf, "%sServer: Awesome Web Server\r\n", buf);
+	sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
+	sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
+	/* TODO customize Rio_writen */
+	Rio_writen(fd, buf, strlen(buf));
+
+	/* Send response body to client */
+	/* TODO customize Open, Mmap, Close, Rio_writen, & Munmap */
+	srcfd = Open(filename, O_RDOLY, 0);
+	srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+	Close(srcfd);
+	Rio_writen(fd, scrp, filesize);
+	Munmap(srcp, filesize);
+}
+
+void get_filetype(char *filename, char *filetype){
+	if(strstr(filename, ".html"))
+		strcpy(filetype, "text/html");
+	else if (strstr(filename, ".gif"))
+		strcpy(filetype, "image/gif");
+	else if (strstr(filename, ".jpg"))
+		strcpy(filetype, "image/jpeg");
+	else
+		strcpy(filetype, "text/plain");
+}
+
+void serve_dynamic(int fd, char *filename, char * cgiargs){
+	char buf[MAXLINE], *emptylist= {NULL};
+
+	/* return 1st part of HTTP response */
+	sprintf(buf, "HTTP/1.0 200 OK\r\n");
+	/* TODO customize Rio_writen */
+	Rio_writen(fd, buf, strlen(buf));
+	sprintf(buf, "Server: Awesome Web Server\r\n");
+	Rio_writen(fd, buf, strlen(buf));
+
+	if(Fork() == 0){ 		// child
+
+		/* Set CGI vars here? */
+
+		setenv("QUERY_STRING", cgiargs, 1);
+		/* TODO customize Dup2 */
+		Dup2(fd, STDOUT_FILENO);				// Redirect stdout to client
+		Execve(filename, emptylist, environ);	// Run CGI prog
+	}
+	/* TODO customize Wait (and NULL???) */
+	Wait(NULL);				// Parent waits for and reaps child
+}
+
+
+
+
+
+
+
+
