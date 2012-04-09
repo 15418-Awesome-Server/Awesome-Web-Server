@@ -52,7 +52,7 @@ int main(){
 	exit(0);
 }
 
-open_listenfd(int port){
+int open_listenfd(int port){
 	int listenfd, optval = 1;
 	struct sockaddr_in serveraddr;
 
@@ -78,3 +78,37 @@ open_listenfd(int port){
 
 	return listenfd;
 }
+
+void doit(int fd){
+	int is_static;
+	struct stat sbuf;
+	char buff[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+	char filename[MAXLINE], cgiargs[MAXLINE];
+	/* TODO customize rio_t? */
+	rio_t rio;
+
+	/* Read request line and headers */
+	/* TODO customize Rio_read... */
+	Rio_readinitb(&rio, fd);
+	Rio_readlineb(&rio, buf, MAXLINE);
+	sscanf(buf, "%s %s %s", method, uri, version);
+	if(strcasecomp(method, "GET")){
+		clienterror(fd, filename, "404", "Not Found", "Awesome couldn't find this file");
+		return;
+	}
+
+	if(is_static){ 	// serve static content
+		if(!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)){
+			clienterror(fd, filename, "403", "Forbidden", "Awesome couldn't read the file");
+			return;
+		}
+		serve_static(fd, filename, sbuf.st_size);
+	}else{ 			// serve dynamic content
+		if(!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)){
+			clienterror(fd, filename, "403", "Forbidden", "Awesome couldn't run the CGI program");
+			return;
+		}
+		serve_dynamic(fd, filename, cgiargs);
+	}
+}
+
