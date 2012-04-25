@@ -15,12 +15,12 @@ int main(int argc, char **argv)
 
   /* Print out arguments here */
   for(i = 0; i < argc; i++)
-    sprintf(content, "%s%s<br />\r\n", content, argv[i]);
+    sprintf(content, "%sargv[%d]: %s<br />\r\n", content, i, argv[i]);
 
   sprintf(content, "%s</p></body></html>", content);
 
   /* Make the HTTP response */
-  printf("Content-length: %d\r\n", strlen(content));
+  printf("Content-length: %zd\r\n", strlen(content));
   printf("Content-type: text/html\r\n\r\n");
   printf("%s", content);
   fflush(stdout);
