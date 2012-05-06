@@ -1,0 +1,1 @@
+mpirun --prefix /usr/lib64/openmpi/ -np N --hostfile hosts -- program

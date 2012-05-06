@@ -1,7 +1,21 @@
 /* $begin Awesomemain */
 /*
- * Awesome.c - A simple, iterative HTTP/1.0 Web server that uses the 
- *     GET method to serve static and dynamic content.
+ * Awesome.c - A distributed, balanced, elastic web server capable of caching certain kinds
+ * of responses. Each process, distributed over multiple machines, has one of three roles.
+ *
+ * ROOT - Also known as the "Dispatcher." Receives connection requests and sends an HTTP 307
+ * redirect response to a worker server to actually serve the content. Also manages the
+ * response cache, so in the right circumstances it will check the cache and potentially serve
+ * the request itself.
+ *
+ * BALANCER - Responsible for the workload management of the server system. Keeps track of
+ * the number of requests currently being serviced by each worker, and keeps the ROOT updated
+ * on which worker to redirect incoming responses to for best performance. Additionally,
+ * dynamically adds or removes workers from the system to deal with fluctuating traffic.
+ *
+ * WORKER - Serves the content requested by the client. Awesome requires that all dynamic
+ * content be requested via POST; it then turns the request body into appropriate arguments
+ * to run the C program specified in the request.
  */
 #include "csapp.h"
 #include "hosts.h"
@@ -17,7 +31,11 @@
 #define HOST_LENGTH 25
 
 /* Define number of initial servers (TODO: Change to command-line arg */
-#define INIT_SERVERS 5
+#define INIT_SERVERS 2
+
+/* Define minimum and maximum load factors */
+#define MIN_THRESHOLD 0.5
+#define MAX_THRESHOLD 1
 
 /* Define MPI tag synonyms */
 #define FLAG 0
@@ -73,17 +91,17 @@ int main(int argc, char **argv)
     int procID;
     int i;
     struct sockaddr_in clientaddr;
-    int redirect = BALANCER+1;
+    int redirect = 2;
     int *num_requests;
     int comm_size;
     int redirect_flag, request_flag, done_flag;
     int request_handler;
     int request_done;
-    MPI_Status stat;
-    MPI_Request req, update;
+    int val;
+    MPI_Status req_stat, update_stat, finish_stat, power_stat, status;
+    MPI_Request req, update, finish, power;
     MPI_Datatype HOST_TYPE;
 
-    printf("Program starting\n");
     fflush(stdout);
 
     MPI_Init(&argc, &argv);
@@ -99,12 +117,10 @@ int main(int argc, char **argv)
     }
     port = atoi(argv[1]) + procID;
 
-
-
     /* Initialize the first servers */
     if (procID > BALANCER)
     {
-      if (procID <= BALANCER + INIT_SERVERS)
+      if (procID < BALANCER+1 + INIT_SERVERS)
         on_flag = 0;
       else
         on_flag = -1;
@@ -112,18 +128,22 @@ int main(int argc, char **argv)
     else
       on_flag = -2;
 
-    /* Wait until servers are initialized to begin working */
-    if (procID == BALANCER)
-      num_requests = (int *)malloc(sizeof(int) * comm_size);
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    printf("Initial servers initialized\n");
-
-
     /* Initialize the load balancer's array of number of requests per worker */
-    MPI_Gather(&on_flag, 1, MPI_INT, num_requests, 1, MPI_INT, BALANCER, MPI_COMM_WORLD);
-    printf("Balancer array initialized\n");
+    num_requests = (int *)malloc(sizeof(int) * comm_size);
+    
+    /************************** Message testing code ************************
+    if (procID == 0) {
+      val = 4;
+      MPI_Send(&val, 1, MPI_INT, 1, 1, MPI_COMM_WORLD);
+    }
 
+    if (procID == 1) {
+      val = 1;
+      printf("%d\n", val);
+      MPI_Recv(&val, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+      printf("%d\n", val);
+    }
+     ************************** Message testing code ************************/
 
     /* Root dispatcher loop */
     if (procID == ROOT)
@@ -137,14 +157,16 @@ int main(int argc, char **argv)
       MPI_Irecv(&redirect, 1, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);
 
       while (1) {
+        
         /* Test for reception of redirection message */
-        MPI_Test(&req, &redirect_flag, &stat);
+        MPI_Test(&req, &redirect_flag, &req_stat);
 
         /* If message was received, acknowledge and post new receive */
         while (redirect_flag) 
         {
+          printf("Redirect received, now %d\n", redirect);
           MPI_Irecv(&redirect, 1, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);
-          MPI_Test(&req, &redirect_flag, &stat);
+          MPI_Test(&req, &redirect_flag, &req_stat);
         }
 
         clientlen=sizeof(clientaddr);
@@ -152,9 +174,10 @@ int main(int argc, char **argv)
         Rio_readinitb(&rio, connfd);
         send_redirect(connfd, redirect, &rio, port);
 
-        /* Tell load balancer to increment the number of requests being handled */
-        MPI_Isend(&redirect, 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD, &update);
         Close(connfd);
+
+        /* Tell load balancer to increment the number of requests being handled */
+        MPI_Send(&redirect, 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD);
       }
     }
 
@@ -162,50 +185,113 @@ int main(int argc, char **argv)
     {
       int min_rank = BALANCER+1;
       int reqs;
+      int totalReqs = 0;
+      int on = 1;
+      int off = 0;
+      int serversOn = INIT_SERVERS;
+      int i;
 
+      for (i = 0; i < comm_size; i++)
+      {
+        if (i == ROOT || i == BALANCER) num_requests[i] = -2;
+        else if (i > BALANCER && i < BALANCER+1 + INIT_SERVERS) num_requests[i] = 0;
+        else num_requests[i] = -1;
+      }
+     
       printf("procID %d is BALANCER\n", procID);
+      printf("[");
+      for(i = 0; i < comm_size; i++)
+        printf("%d ", num_requests[i]);
+      printf("]\n");
       
-      MPI_Irecv(&request_handler, 1, MPI_INT, ROOT, NEW_REQUEST, MPI_COMM_WORLD, &req);
-      MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &update);
+      MPI_Irecv(&request_handler, 1, MPI_INT, ROOT, NEW_REQUEST, MPI_COMM_WORLD, &update);
+      MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
      
       while (1) {
+
         /* Test for reception of new request message */
-        MPI_Test(&req, &request_flag, &stat);
+        MPI_Test(&update, &request_flag, &update_stat);
 
         /* If message was received, acknowledge, update, and post new receive */
         while (request_flag)
         {
+/*          printf("BALANCER notified of new request\n"); */
+
           num_requests[request_handler]++;
-          MPI_Irecv(&request_handler, 1, MPI_INT, ROOT, NEW_REQUEST, MPI_COMM_WORLD, &req);  
-          MPI_Test(&req, &request_flag, &stat);
+
+          printf("Request new : [ ");
+          for(i = 0; i < comm_size; i++)
+            printf("%d ", num_requests[i]);
+          printf("]\n");
+
+          MPI_Irecv(&request_handler, 1, MPI_INT, ROOT, NEW_REQUEST, MPI_COMM_WORLD, &update);  
+          MPI_Test(&update, &request_flag, &update_stat);
         }
 
         /* Test for reception of a message indicating a request is fulfilled */
-        MPI_Test(&update, &done_flag, &stat);
+        MPI_Test(&finish, &done_flag, &finish_stat);
 
         /* If message was received, acknowledge, update, and post new receive */
         while (done_flag)
         {
+/*          printf("BALANCER notified that WORKER %d fulfilled requests\n", request_done); */
           num_requests[request_done]--;
-          MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &update);
-          MPI_Test(&update, &done_flag, &stat);
+          printf("Request done: [ ");
+          for( i = 0; i < comm_size; i++)
+            printf("%d ", num_requests[i]);
+          printf("]\n");
+          MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
+          MPI_Test(&finish, &done_flag, &finish_stat);
         }
 
-        min_rank = BALANCER + 1;
+        min_rank = BALANCER+1;
+        totalReqs = 0;
 
         /* Find the server with the fewest pending requests and select it */
+        /* Elasticity: Find total number of requests */
         for (i = BALANCER + 1; i < comm_size; i++)
         {
           reqs = num_requests[i];
-          if (reqs > 0 && reqs < num_requests[min_rank])
-            min_rank = i;
+          if (reqs > -1)
+          {
+            totalReqs += reqs;
+            if (reqs < num_requests[min_rank])
+              min_rank = i;
+          }
+        }
+
+        if (serversOn < comm_size - 2 && (double)totalReqs / serversOn > MAX_THRESHOLD)
+        {
+          /* Find first off server and turn it on */
+          for (i = BALANCER + 1; i < comm_size; i++)
+          {
+            if (num_requests[i] < 0)
+            {
+              printf("Turning on server %d - Load factor %.4f\n", i, (double)totalReqs / serversOn);
+              MPI_Send(&on, 1, MPI_INT, i, FLAG, MPI_COMM_WORLD);
+              num_requests[i] = 0;
+              serversOn++;
+              break;
+            }
+          }
+        }
+
+        if (serversOn > INIT_SERVERS && (double)totalReqs / serversOn < MIN_THRESHOLD)
+        {
+          printf("Checking if there are too many servers\n");
+          /* Turn off server that was selected earlier */
+          printf("Turning off server %d - Load factor %.4f\n", min_rank, (double)totalReqs / serversOn);
+          MPI_Send(&off, 1, MPI_INT, min_rank, FLAG, MPI_COMM_WORLD);
+          num_requests[min_rank] = -1;
+          serversOn--;
+          continue;
         }
 
         /* If different from before, tell the root */
         if (min_rank != redirect)
         {
           redirect = min_rank;
-          MPI_Isend(&redirect, 1, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, &update);
+          MPI_Isend(&redirect, 1, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, MPI_REQUEST_NULL);
         }
 
       }
@@ -219,22 +305,23 @@ int main(int argc, char **argv)
       on_flag++;
       listenfd = Open_listenfd(port);
 
-      printf("procID %d is WORKER, waiting for redirects\n", procID);
+      printf("procID %d is WORKER, waiting for redirects on port %d and is %s\n", procID, port, on_flag ? "ON" : "OFF");
 
       /* Post receive to change the on-state of the server */
-      MPI_Irecv(&on_flag, 1, MPI_INT, ROOT, FLAG, MPI_COMM_WORLD, &req);
+      MPI_Irecv(&on_flag, 1, MPI_INT, ROOT, FLAG, MPI_COMM_WORLD, &power);
 
       /* Start server loop */
       while (1) {
 
         /* Test if server needs to be turned on or off */
-        MPI_Test(&req, &recv_flag, &stat);
+        MPI_Test(&power, &recv_flag, &power_stat);
 
         /* If message was received, acknowledge and post new receive */
         if (recv_flag)
         {
           recv_flag = 0;
-          MPI_Irecv(&on_flag, 1, MPI_INT, ROOT, FLAG, MPI_COMM_WORLD, &req);
+          printf("Worker %d received on/off message with value: %d\n", procID, on_flag);
+          MPI_Irecv(&on_flag, 1, MPI_INT, ROOT, FLAG, MPI_COMM_WORLD, &power);
         }
 
         /* Check if server is on or off, work accordingly */
@@ -249,7 +336,7 @@ int main(int argc, char **argv)
     	  connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     	  doit(connfd);
     	  Close(connfd);
-        MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, &update);
+        MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
       }
     }
 
@@ -330,15 +417,16 @@ void send_redirect(int fd, int host, rio_t *rio, int port)
 {
   char buf[MAXBUF], uri[MAXLINE], filename[MAXLINE], cgiargs[MAXLINE];
   char method[MAXLINE], version[MAXLINE];
-  char retbuf[MAXBUF];
+  char retbuf[MAXBUF] = { 0 };
 
   /* Read request line and headers */
   Rio_readlineb(rio, buf, MAXLINE);
   sscanf(buf, "%s %s %s", method, uri, version);
   parse_uri(uri, filename, cgiargs);
 
-  sprintf(retbuf, "HTTP/1.0 302 Found\r\n");
+  sprintf(retbuf, "HTTP/1.1 307 Temporary Redirect\r\n");
   sprintf(retbuf, "%sLocation: http://%s:%d/%s\r\n", retbuf, hosts[host], host+port, filename+2);
+
   Rio_writen(fd, retbuf, strlen(retbuf));
 }
 
@@ -372,9 +460,9 @@ int read_requesthdrs(rio_t *rp)
 
 /*    printf("Reading request headers\n"); */
     rio_ret = Rio_readlineb(rp, buf, MAXLINE);
-    printf("%s", buf); 
+  /*  printf("%s", buf); */
     while(rio_ret > 0 && strcmp(buf, "\r\n")) {
-	    printf("%s", buf);
+/*	    printf("%s", buf); */
       if ( (p = strstr(buf, "Content-Length: ")) != NULL)
       {
         p += strlen("Content-length: ");
@@ -425,7 +513,8 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
 void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int len) 
 {
     int srcfd;
-    char *srcp, filetype[MAXLINE], buf[MAXBUF];
+    char *srcp, filetype[MAXLINE];
+    char buf[MAXBUF] = { 0 };
     char body[len];
     char args[MAXLINE];
 
@@ -459,6 +548,8 @@ void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int 
 void parse_body(char *body, char *args, int len)
 {
   int i, j = 0;
+
+
   args[j++] = '-';
   args[j++] = '-';
 
@@ -528,10 +619,11 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
     char *tok;
     int i = 0;
 
+
     /* Read the message body if this is a POST request */
     if (met == POST)
     {
-      /*printf("Reading %d bytes of data\n", len); */
+/*      printf("Reading %d bytes of data\n", len); */
       Rio_readnb(rp, body, len);
       body[len] = '\0';
 /*      printf("Read: %s\n", body); */
@@ -540,6 +632,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
     }
     else
     {
+      printf("Not post?\n");
       parse_body(body, args, len);
     }
 

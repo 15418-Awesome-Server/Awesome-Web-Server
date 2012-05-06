@@ -5,7 +5,7 @@ CFLAGS = -g -O2 -Wall -I .
 # Others systems will probably require something different.
 LIB = -lpthread
 
-all: tiny cgi
+all: tiny cgi auto
 
 tiny: tiny.c csapp.o
 	$(CC) $(CFLAGS) -o tiny tiny.c csapp.o $(LIB)
@@ -15,6 +15,12 @@ csapp.o:
 
 cgi:
 	(cd cgi-bin; make)
+
+auto:
+	$(CC) $(CFLAGS) -o automate/auto automate/auto.c csapp.o
+
+test:
+	$(CC) $(CLFAGS) -o testing/test testing/messages.c
 
 clean:
 	rm -f *.o tiny *~
