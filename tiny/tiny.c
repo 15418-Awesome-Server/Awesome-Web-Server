@@ -37,6 +37,9 @@
 #define MIN_THRESHOLD 0.5
 #define MAX_THRESHOLD 1
 
+/* Define the time for off servers to sleep */
+#define SLEEP_INTERVAL 1
+
 /* Define MPI tag synonyms */
 #define FLAG 0
 #define NEW_REQUEST 1
@@ -89,6 +92,7 @@ int main(int argc, char **argv)
     int on_flag = 0;
     int recv_flag;
     int procID;
+    int *processes;
     int i;
     struct sockaddr_in clientaddr;
     int redirect = 2;
@@ -116,6 +120,11 @@ int main(int argc, char **argv)
     	exit(1);
     }
     port = atoi(argv[1]) + procID;
+
+    processes = (int *)malloc(sizeof(int) * comm_size);
+
+    for(i = 0; i < comm_size; i++)
+      processes[i] = i;
 
     /* Initialize the first servers */
     if (procID > BALANCER)
@@ -177,13 +186,13 @@ int main(int argc, char **argv)
         Close(connfd);
 
         /* Tell load balancer to increment the number of requests being handled */
-        MPI_Send(&redirect, 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD);
+        MPI_Isend(processes + redirect, 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD, MPI_REQUEST_NULL);
       }
     }
 
     if (procID == BALANCER)
     {
-      int min_rank = BALANCER+1;
+      int min_ranks[] = { 0, 0 };
       int reqs;
       int totalReqs = 0;
       int on = 1;
@@ -208,6 +217,7 @@ int main(int argc, char **argv)
       MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
      
       while (1) {
+
 
         /* Test for reception of new request message */
         MPI_Test(&update, &request_flag, &update_stat);
@@ -236,7 +246,7 @@ int main(int argc, char **argv)
         while (done_flag)
         {
 /*          printf("BALANCER notified that WORKER %d fulfilled requests\n", request_done); */
-          if (num_requests[request_handler] > -1)
+          if (num_requests[request_done] > -1)
             num_requests[request_done]--;
   
           printf("Request done: [ ");
@@ -248,7 +258,9 @@ int main(int argc, char **argv)
           MPI_Test(&finish, &done_flag, &finish_stat);
         }
 
-        min_rank = BALANCER+1;
+        min_ranks[0] = BALANCER + 1;
+        min_ranks[1] = BALANCER + 1;
+
         totalReqs = 0;
 
         /* Find the server with the fewest pending requests and select it */
@@ -259,9 +271,31 @@ int main(int argc, char **argv)
           if (reqs > -1)
           {
             totalReqs += reqs;
-            if (reqs < num_requests[min_rank])
-              min_rank = i;
+            if (reqs < num_requests[min_ranks[0]] || num_requests[min_ranks[0]] < 0)
+            {
+              min_ranks[1] = min_ranks[0];
+              min_ranks[0] = i;
+            }
           }
+        }
+        
+        if (serversOn > INIT_SERVERS && (double)totalReqs / serversOn < MIN_THRESHOLD)
+        {
+          /* Turn off server that was selected earlier */
+          if (min_ranks[0] == redirect)
+            min_ranks[0] = min_ranks[1];
+          printf("Turning off server %d - Load factor %.4f\n", min_ranks[0], (double)totalReqs / serversOn);
+          MPI_Send(&off, 1, MPI_INT, min_ranks[0], FLAG, MPI_COMM_WORLD);
+          num_requests[min_ranks[0]] = -1;
+          serversOn--;
+          continue;
+        }
+
+        /* If different from before, tell the root */
+        if (min_ranks[0] != redirect)
+        {
+          redirect = min_ranks[0];
+          MPI_Isend(&redirect, 1, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, MPI_REQUEST_NULL);
         }
 
         if (serversOn < comm_size - 2 && (double)totalReqs / serversOn > MAX_THRESHOLD)
@@ -279,25 +313,6 @@ int main(int argc, char **argv)
             }
           }
         }
-
-        if (serversOn > INIT_SERVERS && (double)totalReqs / serversOn < MIN_THRESHOLD)
-        {
-          printf("Checking if there are too many servers\n");
-          /* Turn off server that was selected earlier */
-          printf("Turning off server %d - Load factor %.4f\n", min_rank, (double)totalReqs / serversOn);
-          MPI_Send(&off, 1, MPI_INT, min_rank, FLAG, MPI_COMM_WORLD);
-          num_requests[min_rank] = -1;
-          serversOn--;
-          continue;
-        }
-
-        /* If different from before, tell the root */
-        if (min_rank != redirect)
-        {
-          redirect = min_rank;
-          MPI_Isend(&redirect, 1, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, MPI_REQUEST_NULL);
-        }
-
       }
 
      free(num_requests);
@@ -310,51 +325,60 @@ int main(int argc, char **argv)
       int new_con;
       struct timeval timeout;
 
-      FD_ZERO(&set);
-      timeout.tv_sec = 1;
-      timeout.tv_usec = 0;
-
       on_flag++;
       listenfd = Open_listenfd(port);
-
-      FD_SET(listenfd, &set);
 
       printf("procID %d is WORKER, waiting for redirects on port %d and is %s\n", procID, port, on_flag ? "ON" : "OFF");
 
       /* Post receive to change the on-state of the server */
-      MPI_Irecv(&on_flag, 1, MPI_INT, ROOT, FLAG, MPI_COMM_WORLD, &power);
+      MPI_Irecv(&on_flag, 1, MPI_INT, BALANCER, FLAG, MPI_COMM_WORLD, &power);
 
       /* Start server loop */
       while (1) {
 
+        FD_ZERO(&set);
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+  
+        FD_SET(listenfd, &set);
+        
         /* Test if server needs to be turned on or off */
         MPI_Test(&power, &recv_flag, &power_stat);
 
         /* If message was received, acknowledge and post new receive */
-        if (recv_flag)
+        while (recv_flag)
         {
           recv_flag = 0;
           printf("Worker %d received on/off message with value: %d\n", procID, on_flag);
-          MPI_Irecv(&on_flag, 1, MPI_INT, ROOT, FLAG, MPI_COMM_WORLD, &power);
+          MPI_Irecv(&on_flag, 1, MPI_INT, BALANCER, FLAG, MPI_COMM_WORLD, &power);
+          MPI_Test(&power, &recv_flag, &power_stat);
         }
-
-        /* Check if server is on or off, work accordingly */
-        if (!on_flag)
-          sleep(5);
 
         /* Get request and work on it */
         clientlen = sizeof(clientaddr);
-        new_con = select(listenfd+1, &set, NULL, NULL, timeout);
-        if (FD_ISSET(listenfd, &set))
+        
+        do {
+          new_con = select(listenfd+1, &set, NULL, NULL, &timeout);
+  
+          if (FD_ISSET(listenfd, &set))
+          {
+    	      connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+    	     doit(connfd);
+    	     Close(connfd);
+           MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+          }
+        } while (new_con > 0);
+
+        /* Check if server is on or off, work accordingly */
+        if (!on_flag)
         {
-    	    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-    	    doit(connfd);
-    	    Close(connfd);
-          if (on_flag)
-            MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+          /*printf("Server %d sleeping\n", procID);*/
+          sleep(SLEEP_INTERVAL);
         }
       }
     }
+
+    free(processes);
 
     /* Never called, but in the bizarre case this is needed, it should be here */
     MPI_Finalize();

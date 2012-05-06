@@ -2,7 +2,7 @@
 #include <mpi.h>
 #include <sys/time.h>
 
-#define STRESS_TIME 15
+#define STRESS_TIME 6
 #define FILES_LENGTH 26
 #define FILES_STEP 17
 
@@ -80,7 +80,7 @@ int main(int argc, char *argv[])
   runStart = start;
   end = start + STRESS_TIME;
 
-  while(num_requests < 10)
+  while(gettime() < end)
   {
 /*    printf("Getting redirect response...");
     fflush(stdout); */
