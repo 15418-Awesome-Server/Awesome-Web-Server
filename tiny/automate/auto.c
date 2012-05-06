@@ -82,15 +82,21 @@ int main(int argc, char *argv[])
 
   while(num_requests < 10)
   {
+/*    printf("Getting redirect response...");
+    fflush(stdout); */
     /* Get redirection response */
     fd = open_clientfd(hostname, port);
-    
+
     rio_readinitb(&rio, fd);
     sprintf(buf, "GET /%s HTTP/1.0\r\n\r\n", files[file % FILES_LENGTH ]);
     rio_writen(fd, buf, strlen(buf));
+/*    printf("done.\n"); */
 
+/*    printf("Reading redirect response...");
+    fflush(stdout); */
     rio_readlineb(&rio, resp, MAXLINE);
     rio_readlineb(&rio, resp, MAXLINE);
+/*    printf("done.\n"); */
 
     close(fd);
     
@@ -113,16 +119,25 @@ int main(int argc, char *argv[])
 
     printf("%s %d %s", hostname, port, redirFile);
 
+/*    printf("Sending object request..."); 
+    fflush(stdout); */
     /* Fully parsed out, now get the actual requested object */
     fd = open_clientfd(hostname, port);
 
     rio_readinitb(&rio, fd);
     sprintf(buf, "GET %s HTTP/1.0\r\n\r\n", redirFile);
     rio_writen(fd, buf, strlen(buf));
+/*    printf("done.\n"); */
 
+/*    printf("Reading object response...");
+    fflush(stdout); */
     while(rio_readlineb(&rio, resp, MAXLINE) > 0);
+/*    printf("done.\n"); */
 
+/*    printf("Closing connection...");
+    fflush(stdout); */
     close(fd);
+/*    printf("done.\n"); */
 
     file += FILES_STEP;
     strcpy(hostname, argv[1]);
@@ -133,6 +148,7 @@ int main(int argc, char *argv[])
     num_requests++;
     
   }
+  printf("procID %d about to finalize\n", procID);
 
   MPI_Finalize();
 

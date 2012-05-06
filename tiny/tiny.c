@@ -217,7 +217,8 @@ int main(int argc, char **argv)
         {
 /*          printf("BALANCER notified of new request\n"); */
 
-          num_requests[request_handler]++;
+          if (num_requests[request_handler] > -1)
+            num_requests[request_handler]++;
 
           printf("Request new : [ ");
           for(i = 0; i < comm_size; i++)
@@ -235,11 +236,14 @@ int main(int argc, char **argv)
         while (done_flag)
         {
 /*          printf("BALANCER notified that WORKER %d fulfilled requests\n", request_done); */
-          num_requests[request_done]--;
+          if (num_requests[request_handler] > -1)
+            num_requests[request_done]--;
+  
           printf("Request done: [ ");
           for( i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
           printf("]\n");
+  
           MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
           MPI_Test(&finish, &done_flag, &finish_stat);
         }
@@ -302,8 +306,18 @@ int main(int argc, char **argv)
     /* Worker servers loop */
     if (procID > BALANCER)
     {
+      fd_set set;
+      int new_con;
+      struct timeval timeout;
+
+      FD_ZERO(&set);
+      timeout.tv_sec = 1;
+      timeout.tv_usec = 0;
+
       on_flag++;
       listenfd = Open_listenfd(port);
+
+      FD_SET(listenfd, &set);
 
       printf("procID %d is WORKER, waiting for redirects on port %d and is %s\n", procID, port, on_flag ? "ON" : "OFF");
 
@@ -326,17 +340,19 @@ int main(int argc, char **argv)
 
         /* Check if server is on or off, work accordingly */
         if (!on_flag)
-        {
           sleep(5);
-          continue;
-        }
 
         /* Get request and work on it */
-	      clientlen = sizeof(clientaddr);
-    	  connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-    	  doit(connfd);
-    	  Close(connfd);
-        MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+        clientlen = sizeof(clientaddr);
+        new_con = select(listenfd+1, &set, NULL, NULL, timeout);
+        if (FD_ISSET(listenfd, &set))
+        {
+    	    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+    	    doit(connfd);
+    	    Close(connfd);
+          if (on_flag)
+            MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+        }
       }
     }
 
