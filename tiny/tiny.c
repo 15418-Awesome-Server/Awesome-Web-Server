@@ -22,6 +22,11 @@
 #include "cache.h"
 #include "cgi-bin/utils.c"
 #include <mpi.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+/* Define the max length of a large string */
+#define MAX_STRLEN 100000
 
 /* Define the MPI root process to be 0 and the balancer to be 1 */
 #define ROOT 0
@@ -36,8 +41,8 @@
 #define INIT_SERVERS 2
 
 /* Define minimum and maximum load factors */
-#define MIN_THRESHOLD 0.5
-#define MAX_THRESHOLD 1
+#define MIN_THRESHOLD 0.3
+#define MAX_THRESHOLD 2
 
 /* Define the minimum size to cache something */
 #define MIN_CACHEOBJ_SIZE 1000
@@ -76,10 +81,10 @@ static char* METHODS[] = {  "HEAD",
 };
 
 
-void doit(int fd);
+void doit(int fd, int procID);
 int  read_requesthdrs(rio_t *rp);
 int  parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int len);
+void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int len, int procID);
 void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t* rp, int len);
 void clienterror(int fd, char *cause, char *errnum, 
@@ -89,8 +94,8 @@ void respond_trace();
 void respond_options();
 void parse_body(char *body, char *args, int len);
 void parse_percent(char *body, char *args, int *i, int *j);
-void send_redirect(int fd, int host, rio_t *rio, int port);
-void do_compute(char *s, int fd);
+int send_redirect(int fd, int host, rio_t *rio, int port);
+void do_compute(char *s, int fd, char *cgiargs, int procID);
 
 int main(int argc, char **argv) 
 {
@@ -168,7 +173,7 @@ int main(int argc, char **argv)
       rio_t rio;
 
       listenfd = Open_listenfd(port);
-      printf("procID %d is ROOT, waiting for connections\n", procID);
+      printf("procID %d is ROOT, waiting for connections with PID %d\n", procID, getpid());
 
       /* Post receive to change the client to redirect to */
       MPI_Irecv(&redirect, 1, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);
@@ -247,10 +252,10 @@ int main(int argc, char **argv)
           if (num_requests[request_handler] > -1)
             num_requests[request_handler]++;
 
-/*          printf("Request new : [ ");
+        /*  printf("Request new : [ ");
           for(i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
-          printf("]\n");*/
+          printf("]\n"); */
 
           MPI_Irecv(&request_handler, 1, MPI_INT, ROOT, NEW_REQUEST, MPI_COMM_WORLD, &update);  
           MPI_Test(&update, &request_flag, &update_stat);
@@ -266,10 +271,10 @@ int main(int argc, char **argv)
           if (num_requests[request_done] > -1)
             num_requests[request_done]--;
   
-          /*printf("Request done: [ ");
+        /*  printf("Request done: [ ");
           for( i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
-          printf("]\n");*/
+          printf("]\n"); */
   
           MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
           MPI_Test(&finish, &done_flag, &finish_stat);
@@ -382,7 +387,7 @@ int main(int argc, char **argv)
           if (FD_ISSET(listenfd, &set))
           {
     	     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-    	     doit(connfd);
+    	     doit(connfd, procID);
     	     Close(connfd);
            MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
           }
@@ -409,10 +414,11 @@ int main(int argc, char **argv)
  * doit - handle one HTTP request/response transaction
  */
 /* $begin doit */
-void doit(int fd) 
+void doit(int fd, int procID) 
 {
     int is_static;
     int met, len = 0;
+    int err;
     struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     char filename[MAXLINE], cgiargs[MAXLINE], filetype[MAXLINE];
@@ -422,7 +428,8 @@ void doit(int fd)
   
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
-    Rio_readlineb(&rio, buf, MAXLINE);
+    if( (err = Rio_readlineb(&rio, buf, MAXLINE)) == -1)
+      return;
     sscanf(buf, "%s %s %s", method, uri, version);
 
     met = find_method(method);
@@ -443,6 +450,18 @@ void doit(int fd)
     }
     read_requesthdrs(&rio); */
 
+    if ( (obj = in_cache(uri)) )
+    {
+      get_filetype(filename, filetype);
+      sprintf(resp_buf, "HTTP/1.0 200 OK\r\n");
+      sprintf(resp_buf, "%sServer: Awesome Web Server\r\n", resp_buf);
+      sprintf(resp_buf, "%sContent-length: %d\r\n", resp_buf, obj->size);
+      sprintf(resp_buf, "%sContent-type: %s\r\n\r\n", resp_buf, filetype);    
+      Rio_writen(fd, resp_buf, strlen(resp_buf));
+      Rio_writen(fd, obj->obj, obj->size);
+      return;
+    }
+
     /* Parse URI from GET request */
     is_static = parse_uri(uri, filename, cgiargs);
     if (stat(filename, &sbuf) < 0) {
@@ -451,31 +470,20 @@ void doit(int fd)
 	    return;
     }
 
+
+    if ( strstr(filename, "cgi-bin/a") || strstr(filename, "cgi-bin/b") || strstr(filename, "cgi-bin/c") )
+    {
+      do_compute(filename, fd, cgiargs, procID);
+      return;
+    }
+
     if (is_static) { /* Serve static content */
 	    if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
 	        clienterror(fd, filename, "403", "Forbidden",
 			    "Awesome couldn't read the file");
 	        return;
 	    } 
-
-      /* If in the cache, write it out to the requester directly from the cache */
-      if ( (obj = in_cache(filename)) )
-      {
-        get_filetype(filename, filetype);
-        sprintf(resp_buf, "HTTP/1.0 200 OK\r\n");
-        sprintf(resp_buf, "%sServer: Awesome Web Server\r\n", resp_buf);
-        sprintf(resp_buf, "%sContent-length: %d\r\n", resp_buf, obj->size);
-        sprintf(resp_buf, "%sContent-type: %s\r\n\r\n", resp_buf, filetype);    
-        Rio_writen(fd, resp_buf, strlen(resp_buf));
-
-        if (met != HEAD) {
-          Rio_writen(fd, obj->obj, obj->size);
-        }
-      }
-      else if ( strstr(filename, "cgi-bin/a") || strstr(filename, "cgi-bin/b") || strstr(filename, "cgi-bin/c") )
-        do_compute(filename, fd);
-      else
-  	    serve_static(fd, filename, sbuf.st_size, met, &rio, len);
+      serve_static(fd, filename, sbuf.st_size, met, &rio, len, procID);
     }
     else { /* Serve dynamic content */
 	    if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
@@ -492,22 +500,28 @@ void doit(int fd)
 /*
  * send_redirect - The dispatcher redirects the client to a worker server
  * */
-void send_redirect(int fd, int host, rio_t *rio, int port)
+int send_redirect(int fd, int host, rio_t *rio, int port)
 {
   char buf[MAXBUF], uri[MAXLINE], filename[MAXLINE], cgiargs[MAXLINE];
   char method[MAXLINE], version[MAXLINE];
   char retbuf[MAXBUF] = { 0 };
+  int err;
 
   /* Read request line and headers */
-  Rio_readlineb(rio, buf, MAXLINE);
+  if( (err = Rio_readlineb(rio, buf, MAXLINE)) == -1 )
+    return -1;
 
   sscanf(buf, "%s %s %s", method, uri, version);
   parse_uri(uri, filename, cgiargs);
 
   sprintf(retbuf, "HTTP/1.1 307 Temporary Redirect\r\n");
-  sprintf(retbuf, "%sLocation: http://%s:%d/%s\r\n", retbuf, hosts[host], host+port, filename+2);
+  sprintf(retbuf, "%sLocation: http://%s:%d/%s", retbuf, hosts[host], host+port, filename+2);
+  if (strlen(cgiargs) != 0)
+    sprintf(retbuf, "%s?%s", retbuf, cgiargs);
+  sprintf(retbuf, "%s\r\n", retbuf);
 
   Rio_writen(fd, retbuf, strlen(retbuf));
+  return 0;
 }
 
 
@@ -590,7 +604,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
  * serve_static - copy a file back to the client 
  */
 /* $begin serve_static */
-void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int len) 
+void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int len, int procID) 
 {
     int srcfd;
     char *srcp, filetype[MAXLINE];
@@ -700,7 +714,6 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
     char *tok;
     int i = 0;
 
-
     /* Read the message body if this is a POST request */
     if (met == POST)
     {
@@ -726,8 +739,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
 
     /* Return first part of HTTP response */
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Server: Awesome Web Server\r\n");
+    sprintf(buf, "%sServer: Awesome Web Server\r\n", buf);
     Rio_writen(fd, buf, strlen(buf));
   
     if (Fork() == 0) { /* child */
@@ -741,29 +753,60 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
 }
 /* $end serve_dynamic */
 
-void do_compute(char *s, int fd)
+void do_compute(char *s, int fd, char *cgiargs, int procID)
 {
+  char filestr[2*MAX_STRLEN] = { 0 };
   char buf[MAXBUF];
+  char filename[MAXLINE];
+  char *resource;  
+  int fileno;
+  FILE *file;
 
   sprintf(buf, "HTTP/1.0 200 OK\r\n");
   sprintf(buf, "%sServer: Awesome Web Server\r\n", buf);
 
-  /* This doesn't actually select a large string to use, so make it pick a large string
-   * out of a file to use. */
-  if( strstr(s, "cgi-bin/a") )
-    reverse(s);
-  else if ( strstr(s, "cgi-bin/b") )
-    sort(s);
+  resource = strdup(s);
+
+  if (strlen(cgiargs) == 0)
+    fileno = 1;
+  else
+    fileno = atoi(cgiargs);
+
+  strcpy(filename, "strings/s");
+  if (fileno == 1) strcat(filename, "1.txt"); 
+  else if (fileno == 2) strcat(filename, "2.txt"); 
+  else if (fileno == 3) strcat(filename, "3.txt"); 
   else
   {
-    right(s);
-  }  
+    cgiargs[0] = '1';
+    cgiargs[1] = '\0';
+    strcat(filename, "1.txt");
+  }
+  
+  file = fopen(filename, "rt");
+  fread(filestr, 1, MAX_STRLEN, file);
+  fclose(file);
 
-  sprintf(buf, "%sContent-length %d\r\n", buf, strlen(s));
-  sprintf(buf, "%sContent-type: %s\r\n", buf, "text/plain");
+  if( strstr(s, "cgi-bin/a") )
+    reverse(filestr);
+  else if ( strstr(s, "cgi-bin/b") )
+    sort(filestr);
+  else if ( strstr(s, "cgi-bin/c") )
+    right(filestr);
+
+  sprintf(buf, "%sContent-length %zd\r\n", buf, strlen(filestr));
+  sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, "text/plain");
 
   Rio_writen(fd, buf, strlen(buf));
-  Rio_writen(fd, s, strlen(s));
+  Rio_writen(fd, filestr, strlen(filestr));
+  
+  strcat(s, "?");
+  strcat(s, cgiargs);
+  
+  if (!in_cache(s+1))
+  {
+    cache_object(filestr, strlen(filestr), s+1);
+  }
 
 }
 

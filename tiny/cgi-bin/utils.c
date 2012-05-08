@@ -1,41 +1,60 @@
+#define MAX_STRLEN 100000
 #include <string.h>
 #include <stdlib.h>
+#include <sys/time.h>
 
-void reverse(char *s)
+double gettime()
 {
-  int len = strlen(s);
-  int i;
-  for(i = 0; i < len/2; i++){
-    s[i] = s[len-i-1];
-  }
-  return s;
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
-void sort(char* s){
-  int len = strlen(s);
+void reverse(char *t)
+{
+  int len = strlen(t);
+  int i;
+  for(i = 0; i < len/2; i++){
+    t[i] ^= t[len-i-1];
+    t[len-i-1] ^= t[i];
+    t[i] ^= t[len-i-1];
+  }
+  return;
+}
+
+void sort(char* t){
+  int len = strlen(t);
   int i, j;
-  int max;
+  int min;
 
   for(i = 0; i < len; i++){
-    max = i;
+    min = i;
+    if (t[i] == '\n') continue;
     for(j = i + 1; j < len; j++){
-      if(s[j] > s[max]){
-        max = i;
+      if(t[j] < t[min] && t[j] != '\n'){
+        min = j;
       }
     }
-    if(i != max){
-      s[i] ^= s[max];
-      s[max] ^= s[i];
-      s[i] ^= s[max];
-    }
+    if(i != min){
+      t[i] ^= t[min];
+      t[min] ^= t[i];
+      t[i] ^= t[min];
+    } 
   }
 }
 
 /* This should print out the right half of s recursively. Currently it does
  * something weird that isn't that. Fix. */
-void right(char *s){
-  int len = strlen(s);
-  sprintf(s, "%s%s\n", s, s+len/2);
-  if(len > 0)
-    right(s+len/2);
+/* oh god bus errors */
+void right(char *t){
+  char *copy;
+
+  int len = strlen(t);
+  
+  copy = strdup(t + len/2);
+  strcat(t, copy);
+  free(copy);
+
+  if(len > 2)
+    right(t + len);
 }

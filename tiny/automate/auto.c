@@ -2,14 +2,16 @@
 #include <mpi.h>
 #include <sys/time.h>
 
-#define STRESS_TIME 20 
-#define FILES_LENGTH 26
+#define STRESS_TIME 100 
+#define FILES_LENGTH 35
 #define FILES_STEP 17
+#define MAX_REQUESTS 100
+#define STAGGER_INTERVAL 5
 
 static char *files[] = { "home.html",
                          "godzilla.jpg",
                          "elasticity/pics.html",
-                         "elasticity/saki1.png",
+                         "elasticity/saki.png",
                          "elasticity/saki2.png",
                          "elasticity/saki3.png",
                          "elasticity/screenshot.png",
@@ -31,7 +33,16 @@ static char *files[] = { "home.html",
                          "automate/src2.html",
                          "automate/src3.html",
                          "automate/src4.html",
-                         "automate/src5.html"
+                         "automate/src5.html",
+                         "cgi-bin/a?1",
+                         "cgi-bin/a?2",
+                         "cgi-bin/a?3",
+                         "cgi-bin/b?1",
+                         "cgi-bin/b?2",
+                         "cgi-bin/b?3",
+                         "cgi-bin/c?1",
+                         "cgi-bin/c?2",
+                         "cgi-bin/c?3",
 };
 
 double gettime()
@@ -44,7 +55,7 @@ double gettime()
 int main(int argc, char *argv[])
 {
   int procID;
-  double start, end;
+  double start, end, cur, br;
   double runStart, runEnd;
   char *hostname;
   char *blk_ptr;
@@ -58,6 +69,7 @@ int main(int argc, char *argv[])
   int fd;
   rio_t rio;
   int num_requests = 0;
+  int total = 0;
 
   if (argc != 3)
   {
@@ -77,8 +89,14 @@ int main(int argc, char *argv[])
   file = procID;
 
   start = gettime();
-  runStart = start;
-  end = start + STRESS_TIME;
+
+  while(gettime() < start + STAGGER_INTERVAL * procID);  
+
+  runStart = gettime();
+  br = runStart;
+  end = runStart + STRESS_TIME;
+
+  printf("procID %d starting\n", procID);
 
   while(gettime() < end)
   {
@@ -114,7 +132,6 @@ int main(int argc, char *argv[])
     port = atoi(portTok);
     redirFile = pathBuf + strlen(portTok);
 
-    printf("%s %d %s", hostname, port, redirFile);
 
 /*    printf("Sending object request..."); 
     fflush(stdout); */
@@ -143,15 +160,17 @@ int main(int argc, char *argv[])
     strcpy(pathBuf, "\0");
 
     num_requests++;
-    
   }
-  printf("procID %d about to finalize\n", procID);
+
+  printf("procID %d done\n", procID);
+  MPI_Reduce(&num_requests, &total, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
   MPI_Finalize();
 
   runEnd = gettime();
 
-  printf("Time elapsed: %.4f\n", runEnd - runStart);
+  if (procID == 0)
+    printf("Total number of fulfilled requests: %d\n", total);
 
   return 0;
 

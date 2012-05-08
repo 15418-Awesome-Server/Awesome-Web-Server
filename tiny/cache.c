@@ -86,8 +86,6 @@ int cache_object(void *obj, int size, char *req)
 
   add_to_front(input);
 
-  printf("Cache size: %d\n", cache_size);
-
   return 0;
 }
 
