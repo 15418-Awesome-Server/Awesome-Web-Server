@@ -19,6 +19,8 @@
  */
 #include "csapp.h"
 #include "hosts.h"
+#include "cache.h"
+#include "cgi-bin/utils.c"
 #include <mpi.h>
 
 /* Define the MPI root process to be 0 and the balancer to be 1 */
@@ -36,6 +38,9 @@
 /* Define minimum and maximum load factors */
 #define MIN_THRESHOLD 0.5
 #define MAX_THRESHOLD 1
+
+/* Define the minimum size to cache something */
+#define MIN_CACHEOBJ_SIZE 1000
 
 /* Define the time for off servers to sleep */
 #define SLEEP_INTERVAL 1
@@ -85,6 +90,7 @@ void respond_options();
 void parse_body(char *body, char *args, int len);
 void parse_percent(char *body, char *args, int *i, int *j);
 void send_redirect(int fd, int host, rio_t *rio, int port);
+void do_compute(char *s, int fd);
 
 int main(int argc, char **argv) 
 {
@@ -101,8 +107,7 @@ int main(int argc, char **argv)
     int redirect_flag, request_flag, done_flag;
     int request_handler;
     int request_done;
-    int val;
-    MPI_Status req_stat, update_stat, finish_stat, power_stat, status;
+    MPI_Status req_stat, update_stat, finish_stat, power_stat; 
     MPI_Request req, update, finish, power;
     MPI_Datatype HOST_TYPE;
 
@@ -120,6 +125,9 @@ int main(int argc, char **argv)
     	exit(1);
     }
     port = atoi(argv[1]) + procID;
+
+    /* Initialize the cache */
+    init_cache();
 
     processes = (int *)malloc(sizeof(int) * comm_size);
 
@@ -173,7 +181,7 @@ int main(int argc, char **argv)
         /* If message was received, acknowledge and post new receive */
         while (redirect_flag) 
         {
-          printf("Redirect received, now %d\n", redirect);
+/*          printf("Redirect received, now %d\n", redirect); */
           MPI_Irecv(&redirect, 1, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);
           MPI_Test(&req, &redirect_flag, &req_stat);
         }
@@ -199,6 +207,7 @@ int main(int argc, char **argv)
       int off = 0;
       int serversOn = INIT_SERVERS;
       int i;
+      int printThing = 0;
 
       for (i = 0; i < comm_size; i++)
       {
@@ -217,7 +226,15 @@ int main(int argc, char **argv)
       MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
      
       while (1) {
-
+        
+        /*if (printThing % 1000000 == 0)
+        {
+          printThing = 0;
+          printf("[");
+          for(i = 0; i < comm_size; i++)
+            printf("%d ", num_requests[i]);
+          printf("]\n");
+        }*/
 
         /* Test for reception of new request message */
         MPI_Test(&update, &request_flag, &update_stat);
@@ -230,10 +247,10 @@ int main(int argc, char **argv)
           if (num_requests[request_handler] > -1)
             num_requests[request_handler]++;
 
-          printf("Request new : [ ");
+/*          printf("Request new : [ ");
           for(i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
-          printf("]\n");
+          printf("]\n");*/
 
           MPI_Irecv(&request_handler, 1, MPI_INT, ROOT, NEW_REQUEST, MPI_COMM_WORLD, &update);  
           MPI_Test(&update, &request_flag, &update_stat);
@@ -249,10 +266,10 @@ int main(int argc, char **argv)
           if (num_requests[request_done] > -1)
             num_requests[request_done]--;
   
-          printf("Request done: [ ");
+          /*printf("Request done: [ ");
           for( i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
-          printf("]\n");
+          printf("]\n");*/
   
           MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
           MPI_Test(&finish, &done_flag, &finish_stat);
@@ -284,7 +301,7 @@ int main(int argc, char **argv)
           /* Turn off server that was selected earlier */
           if (min_ranks[0] == redirect)
             min_ranks[0] = min_ranks[1];
-          printf("Turning off server %d - Load factor %.4f\n", min_ranks[0], (double)totalReqs / serversOn);
+          printf("Turning off server %d - Load factor %.4f - serversOn = %d\n", min_ranks[0], (double)totalReqs / serversOn, serversOn);
           MPI_Send(&off, 1, MPI_INT, min_ranks[0], FLAG, MPI_COMM_WORLD);
           num_requests[min_ranks[0]] = -1;
           serversOn--;
@@ -313,6 +330,7 @@ int main(int argc, char **argv)
             }
           }
         }
+        printThing++;
       }
 
      free(num_requests);
@@ -326,6 +344,7 @@ int main(int argc, char **argv)
       struct timeval timeout;
 
       on_flag++;
+      init_cache();
       listenfd = Open_listenfd(port);
 
       printf("procID %d is WORKER, waiting for redirects on port %d and is %s\n", procID, port, on_flag ? "ON" : "OFF");
@@ -349,7 +368,7 @@ int main(int argc, char **argv)
         while (recv_flag)
         {
           recv_flag = 0;
-          printf("Worker %d received on/off message with value: %d\n", procID, on_flag);
+   /*       printf("Worker %d received on/off message with value: %d\n", procID, on_flag); */
           MPI_Irecv(&on_flag, 1, MPI_INT, BALANCER, FLAG, MPI_COMM_WORLD, &power);
           MPI_Test(&power, &recv_flag, &power_stat);
         }
@@ -362,7 +381,7 @@ int main(int argc, char **argv)
   
           if (FD_ISSET(listenfd, &set))
           {
-    	      connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+    	     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     	     doit(connfd);
     	     Close(connfd);
            MPI_Isend(&procID, 1, MPI_INT, BALANCER, REQUEST_DONE, MPI_COMM_WORLD, MPI_REQUEST_NULL);
@@ -396,8 +415,10 @@ void doit(int fd)
     int met, len = 0;
     struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-    char filename[MAXLINE], cgiargs[MAXLINE];
+    char filename[MAXLINE], cgiargs[MAXLINE], filetype[MAXLINE];
+    char resp_buf[MAXBUF];
     rio_t rio;
+    cacheobj *obj;
   
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
@@ -436,7 +457,25 @@ void doit(int fd)
 			    "Awesome couldn't read the file");
 	        return;
 	    } 
-	    serve_static(fd, filename, sbuf.st_size, met, &rio, len);
+
+      /* If in the cache, write it out to the requester directly from the cache */
+      if ( (obj = in_cache(filename)) )
+      {
+        get_filetype(filename, filetype);
+        sprintf(resp_buf, "HTTP/1.0 200 OK\r\n");
+        sprintf(resp_buf, "%sServer: Awesome Web Server\r\n", resp_buf);
+        sprintf(resp_buf, "%sContent-length: %d\r\n", resp_buf, obj->size);
+        sprintf(resp_buf, "%sContent-type: %s\r\n\r\n", resp_buf, filetype);    
+        Rio_writen(fd, resp_buf, strlen(resp_buf));
+
+        if (met != HEAD) {
+          Rio_writen(fd, obj->obj, obj->size);
+        }
+      }
+      else if ( strstr(filename, "cgi-bin/a") || strstr(filename, "cgi-bin/b") || strstr(filename, "cgi-bin/c") )
+        do_compute(filename, fd);
+      else
+  	    serve_static(fd, filename, sbuf.st_size, met, &rio, len);
     }
     else { /* Serve dynamic content */
 	    if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
@@ -461,6 +500,7 @@ void send_redirect(int fd, int host, rio_t *rio, int port)
 
   /* Read request line and headers */
   Rio_readlineb(rio, buf, MAXLINE);
+
   sscanf(buf, "%s %s %s", method, uri, version);
   parse_uri(uri, filename, cgiargs);
 
@@ -581,6 +621,7 @@ void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int 
       srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
       Close(srcfd);
       Rio_writen(fd, srcp, filesize);
+      cache_object(srcp, filesize, filename);
       Munmap(srcp, filesize);
     }
 }
@@ -699,6 +740,33 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
     Wait(NULL); /* Parent waits for and reaps child */
 }
 /* $end serve_dynamic */
+
+void do_compute(char *s, int fd)
+{
+  char buf[MAXBUF];
+
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");
+  sprintf(buf, "%sServer: Awesome Web Server\r\n", buf);
+
+  /* This doesn't actually select a large string to use, so make it pick a large string
+   * out of a file to use. */
+  if( strstr(s, "cgi-bin/a") )
+    reverse(s);
+  else if ( strstr(s, "cgi-bin/b") )
+    sort(s);
+  else
+  {
+    right(s);
+  }  
+
+  sprintf(buf, "%sContent-length %d\r\n", buf, strlen(s));
+  sprintf(buf, "%sContent-type: %s\r\n", buf, "text/plain");
+
+  Rio_writen(fd, buf, strlen(buf));
+  Rio_writen(fd, s, strlen(s));
+
+}
+
 
 /*
  * respond_trace - Respond to TRACE requests

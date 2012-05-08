@@ -2,7 +2,7 @@
 #include <mpi.h>
 #include <sys/time.h>
 
-#define STRESS_TIME 6
+#define STRESS_TIME 20 
 #define FILES_LENGTH 26
 #define FILES_STEP 17
 
@@ -92,11 +92,8 @@ int main(int argc, char *argv[])
     rio_writen(fd, buf, strlen(buf));
 /*    printf("done.\n"); */
 
-/*    printf("Reading redirect response...");
-    fflush(stdout); */
     rio_readlineb(&rio, resp, MAXLINE);
     rio_readlineb(&rio, resp, MAXLINE);
-/*    printf("done.\n"); */
 
     close(fd);
     
@@ -108,7 +105,7 @@ int main(int argc, char *argv[])
     tok = strtok(tok, ":");
     hostname = strtok(NULL, ":");
     hostname += 2;
-
+    
     /* hostname now has the host to go to, so get port */
     tok = strtok(NULL, ":");
     strcpy(pathBuf, tok);
