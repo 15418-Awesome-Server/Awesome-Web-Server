@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <sys/time.h>
 
+long getsec()
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_sec;
+}
+
 double gettime()
 {
   struct timeval tv;
@@ -43,9 +50,6 @@ void sort(char* t){
   }
 }
 
-/* This should print out the right half of s recursively. Currently it does
- * something weird that isn't that. Fix. */
-/* oh god bus errors */
 void right(char *t){
   char *copy;
 

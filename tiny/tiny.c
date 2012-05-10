@@ -38,7 +38,7 @@
 #define HOST_LENGTH 25
 
 /* Define number of initial servers (TODO: Change to command-line arg */
-#define INIT_SERVERS 2
+#define INIT_SERVERS 2 
 
 /* Define minimum and maximum load factors */
 #define MIN_THRESHOLD 0.3
@@ -46,6 +46,9 @@
 
 /* Define the minimum size to cache something */
 #define MIN_CACHEOBJ_SIZE 1000
+
+/* Define loop limit */
+#define LOOP_LIMIT 10
 
 /* Define the time for off servers to sleep */
 #define SLEEP_INTERVAL 1
@@ -96,6 +99,7 @@ void parse_body(char *body, char *args, int len);
 void parse_percent(char *body, char *args, int *i, int *j);
 int send_redirect(int fd, int host, rio_t *rio, int port);
 void do_compute(char *s, int fd, char *cgiargs, int procID);
+void print_array(int *arr, int len);
 
 int main(int argc, char **argv) 
 {
@@ -104,10 +108,11 @@ int main(int argc, char **argv)
     int recv_flag;
     int procID;
     int *processes;
+    int *rr_array;
     int i;
     struct sockaddr_in clientaddr;
     int redirect = 2;
-    int *num_requests;
+    long *num_requests;
     int comm_size;
     int redirect_flag, request_flag, done_flag;
     int request_handler;
@@ -117,6 +122,7 @@ int main(int argc, char **argv)
     MPI_Datatype HOST_TYPE;
 
     fflush(stdout);
+    Signal(SIGPIPE, SIG_IGN);
 
     MPI_Init(&argc, &argv);
 
@@ -135,6 +141,11 @@ int main(int argc, char **argv)
     init_cache();
 
     processes = (int *)malloc(sizeof(int) * comm_size);
+    rr_array = (int *)malloc(sizeof(int) * comm_size / 2);
+    if (procID == ROOT) printf("rr_array: %p\n", rr_array);
+
+    for (i = 0; i < comm_size / 2; i++)
+      rr_array[i] = BALANCER + 1 + i;
 
     for(i = 0; i < comm_size; i++)
       processes[i] = i;
@@ -151,7 +162,7 @@ int main(int argc, char **argv)
       on_flag = -2;
 
     /* Initialize the load balancer's array of number of requests per worker */
-    num_requests = (int *)malloc(sizeof(int) * comm_size);
+    num_requests = (long *)malloc(sizeof(long) * comm_size);
     
     /************************** Message testing code ************************
     if (procID == 0) {
@@ -171,11 +182,14 @@ int main(int argc, char **argv)
     if (procID == ROOT)
     {
       rio_t rio;
+      int rr = 0;
+      int i;
 
       listenfd = Open_listenfd(port);
       printf("procID %d is ROOT, waiting for connections with PID %d\n", procID, getpid());
 
       /* Post receive to change the client to redirect to */
+      /*MPI_Irecv(rr_array, comm_size / 2, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);*/
       MPI_Irecv(&redirect, 1, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);
 
       while (1) {
@@ -184,22 +198,37 @@ int main(int argc, char **argv)
         MPI_Test(&req, &redirect_flag, &req_stat);
 
         /* If message was received, acknowledge and post new receive */
-        while (redirect_flag) 
+        while (redirect_flag)
         {
-/*          printf("Redirect received, now %d\n", redirect); */
+          /*MPI_Irecv(rr_array, comm_size / 2, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);*/
           MPI_Irecv(&redirect, 1, MPI_INT, BALANCER, CHANGE_REDIRECT, MPI_COMM_WORLD, &req);
           MPI_Test(&req, &redirect_flag, &req_stat);
         }
 
         clientlen=sizeof(clientaddr);
         connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-        Rio_readinitb(&rio, connfd);
-        send_redirect(connfd, redirect, &rio, port);
+        rio_readinitb(&rio, connfd);
 
+/*        printf("rr_array: [");
+        for(i = 0; i < comm_size / 2; i++)
+          printf("%d, ", rr_array[i]);
+        printf("]\n"); */
+
+        /* Select the actual redirect location here */
+        /*while(rr_array[rr] < 0)*/
+        /*{*/
+          /*rr = (rr + 1) % (comm_size / 2);*/
+        /*}*/
+
+        /*send_redirect(connfd, rr_array[rr], &rio, port);*/
+        send_redirect(connfd, redirect, &rio, port);
         Close(connfd);
 
         /* Tell load balancer to increment the number of requests being handled */
-        MPI_Isend(processes + redirect, 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+        /*MPI_Send(&(rr_array[rr]), 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD);*/
+        MPI_Send(&redirect, 1, MPI_INT, BALANCER, NEW_REQUEST, MPI_COMM_WORLD);
+
+        rr = (rr + 1) % (comm_size / 2);
       }
     }
 
@@ -211,8 +240,14 @@ int main(int argc, char **argv)
       int on = 1;
       int off = 0;
       int serversOn = INIT_SERVERS;
-      int i;
+      int rr_array_length = (serversOn+1) / 2;
+      int i, j;
+      double old = 0;
       int printThing = 0;
+      int new_request_limit = 0;
+      int request_done_limit = 0;
+      int max_rank, passed_on, new_max;
+
 
       for (i = 0; i < comm_size; i++)
       {
@@ -231,6 +266,12 @@ int main(int argc, char **argv)
       MPI_Irecv(&request_done, 1, MPI_INT, MPI_ANY_SOURCE, REQUEST_DONE, MPI_COMM_WORLD, &finish);
      
       while (1) {
+        new_request_limit = 0;
+        request_done_limit = 0;
+        max_rank = 0;
+        passed_on = 0;
+        new_max = 0;
+        rr_array_length = (serversOn+1) / 2;
         
         /*if (printThing % 1000000 == 0)
         {
@@ -252,7 +293,7 @@ int main(int argc, char **argv)
           if (num_requests[request_handler] > -1)
             num_requests[request_handler]++;
 
-        /*  printf("Request new : [ ");
+        /*  printf("Request new  at %d: [ ", request_handler);
           for(i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
           printf("]\n"); */
@@ -267,11 +308,11 @@ int main(int argc, char **argv)
         /* If message was received, acknowledge, update, and post new receive */
         while (done_flag)
         {
-/*          printf("BALANCER notified that WORKER %d fulfilled requests\n", request_done); */
+  /*      printf("BALANCER notified that WORKER %d fulfilled requests\n", request_done); */
           if (num_requests[request_done] > -1)
             num_requests[request_done]--;
   
-        /*  printf("Request done: [ ");
+/*          printf("Request done at %d: [ ", request_done);
           for( i = 0; i < comm_size; i++)
             printf("%d ", num_requests[i]);
           printf("]\n"); */
@@ -284,6 +325,59 @@ int main(int argc, char **argv)
         min_ranks[1] = BALANCER + 1;
 
         totalReqs = 0;
+
+        /* Find total number of requests and create the array to send to the dispatcher */
+/*        for(i = BALANCER + 1; i < comm_size; i++)
+        {
+          reqs = num_requests[i];
+
+          /* Only consider servers that are on
+          if (reqs > -1)
+          {
+            totalReqs += reqs;
+
+            if (reqs < num_requests[min_ranks[0]] || num_requests[min_ranks[0]] < 0)
+            {
+              min_ranks[1] = min_ranks[0];
+              min_ranks[0] = i;
+            }
+
+            /* Collect the first (serversOn+1)/2 servers into the array to send
+            if (passed_on < rr_array_length)
+            {
+              rr_array[passed_on++] = i;
+              if (reqs > num_requests[max_rank]) max_rank = i;
+            }
+            /* Select the minimally-full n/2 servers to sen
+            else
+            {
+              new_max = 0;
+
+              /* If the number of requests of this processor is less than the number of
+               * requests on the most burdened processor, replace it and find the new
+               * maximum
+              if (reqs < num_requests[max_rank])
+              {
+                for(j = 0; j < rr_array_length; j++)
+                {
+                  if (rr_array[j] == max_rank)
+                    rr_array[j] = i;
+                  if (num_requests[rr_array[j]] > num_requests[new_max])
+                    new_max = rr_array[j];
+                }
+                max_rank = new_max;
+              }
+            }
+          }
+          else if (reqs < -2)
+          {
+            if (getsec() + reqs > SLEEP_INTERVAL)
+              num_requests[i] = 0;
+          }
+        }
+
+        for(i = rr_array_length; i < comm_size / 2; i++)
+          rr_array[i] = -1;*/
 
         /* Find the server with the fewest pending requests and select it */
         /* Elasticity: Find total number of requests */
@@ -299,43 +393,57 @@ int main(int argc, char **argv)
               min_ranks[0] = i;
             }
           }
-        }
-        
-        if (serversOn > INIT_SERVERS && (double)totalReqs / serversOn < MIN_THRESHOLD)
-        {
-          /* Turn off server that was selected earlier */
-          if (min_ranks[0] == redirect)
-            min_ranks[0] = min_ranks[1];
-          printf("Turning off server %d - Load factor %.4f - serversOn = %d\n", min_ranks[0], (double)totalReqs / serversOn, serversOn);
-          MPI_Send(&off, 1, MPI_INT, min_ranks[0], FLAG, MPI_COMM_WORLD);
-          num_requests[min_ranks[0]] = -1;
-          serversOn--;
-          continue;
-        }
-
-        /* If different from before, tell the root */
-        if (min_ranks[0] != redirect)
-        {
-          redirect = min_ranks[0];
-          MPI_Isend(&redirect, 1, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, MPI_REQUEST_NULL);
-        }
-
-        if (serversOn < comm_size - 2 && (double)totalReqs / serversOn > MAX_THRESHOLD)
-        {
-          /* Find first off server and turn it on */
-          for (i = BALANCER + 1; i < comm_size; i++)
+          if (reqs < -2)
           {
-            if (num_requests[i] < 0)
+            if (getsec() + reqs > SLEEP_INTERVAL)
             {
-              printf("Turning on server %d - Load factor %.4f\n", i, (double)totalReqs / serversOn);
-              MPI_Send(&on, 1, MPI_INT, i, FLAG, MPI_COMM_WORLD);
+              printf("Redirects now eligible to server %d\n", i);
               num_requests[i] = 0;
-              serversOn++;
-              break;
             }
           }
         }
-        printThing++;
+        
+        /*if (gettime() - old > 0)*/
+        /*{*/
+          old = gettime();
+          if (serversOn > INIT_SERVERS && (double)totalReqs / serversOn < MIN_THRESHOLD)
+          {
+            /* Turn off server that was selected earlier */
+            if (min_ranks[0] == redirect)
+              min_ranks[0] = min_ranks[1];
+            MPI_Isend(&off, 1, MPI_INT, min_ranks[0], FLAG, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+            num_requests[min_ranks[0]] = -1;
+            serversOn--;
+            continue;
+          }
+
+          /* Send the root its new array */
+          /* printf("Sending ");
+          print_array(rr_array, comm_size / 2); */
+          /*MPI_Isend(rr_array, comm_size / 2, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, MPI_REQUEST_NULL);*/
+
+          /* If different from before, tell the root */
+          if (min_ranks[0] != redirect)
+          {
+            redirect = min_ranks[0];
+            MPI_Isend(&redirect, 1, MPI_INT, ROOT, CHANGE_REDIRECT, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+          } 
+
+          if (serversOn < comm_size - 2 && (double)totalReqs / serversOn > MAX_THRESHOLD)
+          {
+            /* Find first off server and turn it on */
+            for (i = BALANCER + 1; i < comm_size; i++)
+            {
+              if (num_requests[i] == -1)
+              {
+                printf("Turning on server %d\n", i);
+                MPI_Isend(&on, 1, MPI_INT, i, FLAG, MPI_COMM_WORLD, MPI_REQUEST_NULL);
+                num_requests[i] = -1 * getsec();
+                serversOn++;
+                break;
+              }
+            }
+          }
       }
 
      free(num_requests);
@@ -427,8 +535,8 @@ void doit(int fd, int procID)
     cacheobj *obj;
   
     /* Read request line and headers */
-    Rio_readinitb(&rio, fd);
-    if( (err = Rio_readlineb(&rio, buf, MAXLINE)) == -1)
+    rio_readinitb(&rio, fd);
+    if( (err = rio_readlineb(&rio, buf, MAXLINE)) == -1)
       return;
     sscanf(buf, "%s %s %s", method, uri, version);
 
@@ -450,17 +558,17 @@ void doit(int fd, int procID)
     }
     read_requesthdrs(&rio); */
 
-    if ( (obj = in_cache(uri)) )
+    /*if ( (obj = in_cache(uri)) )
     {
       get_filetype(filename, filetype);
       sprintf(resp_buf, "HTTP/1.0 200 OK\r\n");
       sprintf(resp_buf, "%sServer: Awesome Web Server\r\n", resp_buf);
       sprintf(resp_buf, "%sContent-length: %d\r\n", resp_buf, obj->size);
       sprintf(resp_buf, "%sContent-type: %s\r\n\r\n", resp_buf, filetype);    
-      Rio_writen(fd, resp_buf, strlen(resp_buf));
-      Rio_writen(fd, obj->obj, obj->size);
+      rio_writen(fd, resp_buf, strlen(resp_buf));
+      rio_writen(fd, obj->obj, obj->size);
       return;
-    }
+    }*/
 
     /* Parse URI from GET request */
     is_static = parse_uri(uri, filename, cgiargs);
@@ -508,7 +616,7 @@ int send_redirect(int fd, int host, rio_t *rio, int port)
   int err;
 
   /* Read request line and headers */
-  if( (err = Rio_readlineb(rio, buf, MAXLINE)) == -1 )
+  if( (err = rio_readlineb(rio, buf, MAXLINE)) == -1 )
     return -1;
 
   sscanf(buf, "%s %s %s", method, uri, version);
@@ -520,7 +628,7 @@ int send_redirect(int fd, int host, rio_t *rio, int port)
     sprintf(retbuf, "%s?%s", retbuf, cgiargs);
   sprintf(retbuf, "%s\r\n", retbuf);
 
-  Rio_writen(fd, retbuf, strlen(retbuf));
+  rio_writen(fd, retbuf, strlen(retbuf));
   return 0;
 }
 
@@ -553,7 +661,7 @@ int read_requesthdrs(rio_t *rp)
     int rio_ret;
 
 /*    printf("Reading request headers\n"); */
-    rio_ret = Rio_readlineb(rp, buf, MAXLINE);
+    rio_ret = rio_readlineb(rp, buf, MAXLINE);
   /*  printf("%s", buf); */
     while(rio_ret > 0 && strcmp(buf, "\r\n")) {
 /*	    printf("%s", buf); */
@@ -562,7 +670,7 @@ int read_requesthdrs(rio_t *rp)
         p += strlen("Content-length: ");
         len = atoi(p);
       }
-    rio_ret =  Rio_readlineb(rp, buf, MAXLINE);
+    rio_ret =  rio_readlineb(rp, buf, MAXLINE);
     }
     return len;
 }
@@ -615,7 +723,7 @@ void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int 
     /* Read the message body if this is a POST request */
     if (met == POST)
     {
-      Rio_readnb(rp, body, len);
+      rio_readnb(rp, body, len);
     }
 
     /* Parse the message body to turn it into arguments */
@@ -627,15 +735,15 @@ void serve_static(int fd, char *filename, int filesize, int met, rio_t* rp, int 
     sprintf(buf, "%sServer: Awesome Web Server\r\n", buf);
     sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
     sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
-    Rio_writen(fd, buf, strlen(buf));
+    rio_writen(fd, buf, strlen(buf));
 
     if (met != HEAD) {
       /* Send response body to client */
       srcfd = Open(filename, O_RDONLY, 0);
       srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
       Close(srcfd);
-      Rio_writen(fd, srcp, filesize);
-      cache_object(srcp, filesize, filename);
+      rio_writen(fd, srcp, filesize);
+      /*cache_object(srcp, filesize, filename);*/
       Munmap(srcp, filesize);
     }
 }
@@ -718,7 +826,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
     if (met == POST)
     {
 /*      printf("Reading %d bytes of data\n", len); */
-      Rio_readnb(rp, body, len);
+      rio_readnb(rp, body, len);
       body[len] = '\0';
 /*      printf("Read: %s\n", body); */
       parse_body(body, args, len);
@@ -740,7 +848,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, int met, rio_t *rp, in
     /* Return first part of HTTP response */
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
     sprintf(buf, "%sServer: Awesome Web Server\r\n", buf);
-    Rio_writen(fd, buf, strlen(buf));
+    rio_writen(fd, buf, strlen(buf));
   
     if (Fork() == 0) { /* child */
     	/* Real server would set all CGI vars here */
@@ -797,16 +905,16 @@ void do_compute(char *s, int fd, char *cgiargs, int procID)
   sprintf(buf, "%sContent-length %zd\r\n", buf, strlen(filestr));
   sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, "text/plain");
 
-  Rio_writen(fd, buf, strlen(buf));
-  Rio_writen(fd, filestr, strlen(filestr));
+  rio_writen(fd, buf, strlen(buf));
+  rio_writen(fd, filestr, strlen(filestr));
   
   strcat(s, "?");
   strcat(s, cgiargs);
   
-  if (!in_cache(s+1))
+/*  if (!in_cache(s+1))
   {
     cache_object(filestr, strlen(filestr), s+1);
-  }
+  } */
 
 }
 
@@ -820,7 +928,7 @@ void respond_trace(int fd, char *request)
   char buf[MAXLINE];
 
   sprintf(buf, request);
-  Rio_writen(fd, buf, strlen(buf));
+  rio_writen(fd, buf, strlen(buf));
 }
 
 /*
@@ -836,7 +944,7 @@ void respond_options(int fd)
   sprintf(buf, "%sConnection: close\r\n", buf);
   sprintf(buf, "%sAllow: GET, HEAD, POST, TRACE, OPTIONS\r\n", buf);
   sprintf(buf, "%sContent-length: 0\r\n", buf);
-  Rio_writen(fd, buf, strlen(buf));
+  rio_writen(fd, buf, strlen(buf));
 }
 /*
  * clienterror - returns an error message to the client
@@ -856,11 +964,22 @@ void clienterror(int fd, char *cause, char *errnum,
 
     /* Print the HTTP response */
     sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
-    Rio_writen(fd, buf, strlen(buf));
+    rio_writen(fd, buf, strlen(buf));
     sprintf(buf, "Content-type: text/html\r\n");
-    Rio_writen(fd, buf, strlen(buf));
+    rio_writen(fd, buf, strlen(buf));
     sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
-    Rio_writen(fd, buf, strlen(buf));
-    Rio_writen(fd, body, strlen(body));
+    rio_writen(fd, buf, strlen(buf));
+    rio_writen(fd, body, strlen(body));
 }
 /* $end clienterror */
+
+void print_array(int *arr, int len)
+{
+  int i;
+
+  printf("array: [");
+  for(i = 0; i < len; i++)
+    printf("%d, ", arr[i]);
+  printf("]\n");
+
+}

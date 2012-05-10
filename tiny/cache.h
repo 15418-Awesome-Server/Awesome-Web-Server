@@ -33,7 +33,7 @@
 
 #define MAX_CACHE_SIZE  5000000
 #define MAX_OBJECT_SIZE 1000000
-#define MIN_OBJECT_SIZE 1000
+#define MIN_OBJECT_SIZE 0
 
 /* 
  * Each cache object is stored as a key-value pair. The key is the original

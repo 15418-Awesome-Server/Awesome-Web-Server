@@ -5,7 +5,7 @@
 #define STRESS_TIME 100 
 #define FILES_LENGTH 35
 #define FILES_STEP 17
-#define MAX_REQUESTS 100
+#define MAX_REQUESTS 10
 #define STAGGER_INTERVAL 5
 
 static char *files[] = { "home.html",
@@ -45,6 +45,44 @@ static char *files[] = { "home.html",
                          "cgi-bin/c?3",
 };
 
+static int probabilities[] = { 3, 
+                               1,
+                               4,
+                               4,
+                               4,
+                               4,
+                               4,
+                               4,
+                               4,
+                               3,
+                               3,
+                               4,
+                               4,
+                               4,
+                               3,
+                               3,
+                               3,
+                               3,
+                               4,
+                               4,
+                               4,
+                               3,
+                               3,
+                               3,
+                               4,
+                               4,
+                               1,
+                               1,
+                               1,
+                               1,
+                               1,
+                               1,
+                               1,
+                               1,
+                               1
+};
+
+
 double gettime()
 {
   struct timeval tv;
@@ -52,10 +90,32 @@ double gettime()
   return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
+long getusec()
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_usec;
+}
+
+int choose_file()
+{
+  int seed = (int)getusec();
+  srand(seed);
+  int r = rand() % 100;
+  int choice = 0;
+  int acc = 0;
+
+  while (acc + probabilities[choice] < r)
+    acc += probabilities[choice++];
+
+  return choice;
+}
+
+
 int main(int argc, char *argv[])
 {
   int procID;
-  double start, end, cur, br;
+  double start, end, br;
   double runStart, runEnd;
   char *hostname;
   char *blk_ptr;
@@ -70,6 +130,7 @@ int main(int argc, char *argv[])
   rio_t rio;
   int num_requests = 0;
   int total = 0;
+  int choice;
 
   if (argc != 3)
   {
@@ -90,13 +151,12 @@ int main(int argc, char *argv[])
 
   start = gettime();
 
-  while(gettime() < start + STAGGER_INTERVAL * procID);  
+  while(gettime() < start + STAGGER_INTERVAL * (procID/3));  
 
   runStart = gettime();
   br = runStart;
   end = runStart + STRESS_TIME;
 
-  printf("procID %d starting\n", procID);
 
   while(gettime() < end)
   {
@@ -106,7 +166,11 @@ int main(int argc, char *argv[])
     fd = open_clientfd(hostname, port);
 
     rio_readinitb(&rio, fd);
-    sprintf(buf, "GET /%s HTTP/1.0\r\n\r\n", files[file % FILES_LENGTH ]);
+
+     choice = choose_file();
+     /*choice = file % FILES_LENGTH;*/
+
+    sprintf(buf, "GET /%s HTTP/1.0\r\n\r\n", files[choice]);
     rio_writen(fd, buf, strlen(buf));
 /*    printf("done.\n"); */
 
@@ -131,8 +195,7 @@ int main(int argc, char *argv[])
 
     port = atoi(portTok);
     redirFile = pathBuf + strlen(portTok);
-
-
+    
 /*    printf("Sending object request..."); 
     fflush(stdout); */
     /* Fully parsed out, now get the actual requested object */
@@ -162,7 +225,6 @@ int main(int argc, char *argv[])
     num_requests++;
   }
 
-  printf("procID %d done\n", procID);
   MPI_Reduce(&num_requests, &total, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
   MPI_Finalize();
