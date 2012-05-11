@@ -5,10 +5,10 @@ CFLAGS = -g -O2 -Wall -I .
 # Others systems will probably require something different.
 LIB = -lpthread
 
-all: tiny cgi auto
+all: awesome cgi auto
 
-tiny: tiny.c csapp.o cache.o
-	$(CC) $(CFLAGS) -o tiny tiny.c csapp.o cache.o $(LIB)
+awesome: awesome.c csapp.o cache.o
+	$(CC) $(CFLAGS) -o awesome awesome.c csapp.o cache.o $(LIB)
 
 csapp.o:
 	$(CC) $(CFLAGS) -c csapp.c
@@ -26,6 +26,6 @@ test:
 	$(CC) $(CLFAGS) -o testing/test testing/messages.c
 
 clean:
-	rm -f *.o tiny *~
+	rm -f *.o awesome *~
 	(cd cgi-bin; make clean)
 

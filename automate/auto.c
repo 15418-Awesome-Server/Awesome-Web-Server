@@ -160,9 +160,6 @@ int main(int argc, char *argv[])
 
   while(gettime() < end)
   {
-/*    printf("Getting redirect response...");
-    fflush(stdout); */
-    /* Get redirection response */
     fd = open_clientfd(hostname, port);
 
     rio_readinitb(&rio, fd);
@@ -172,7 +169,6 @@ int main(int argc, char *argv[])
 
     sprintf(buf, "GET /%s HTTP/1.0\r\n\r\n", files[choice]);
     rio_writen(fd, buf, strlen(buf));
-/*    printf("done.\n"); */
 
     rio_readlineb(&rio, resp, MAXLINE);
     rio_readlineb(&rio, resp, MAXLINE);
@@ -196,25 +192,16 @@ int main(int argc, char *argv[])
     port = atoi(portTok);
     redirFile = pathBuf + strlen(portTok);
     
-/*    printf("Sending object request..."); 
-    fflush(stdout); */
     /* Fully parsed out, now get the actual requested object */
     fd = open_clientfd(hostname, port);
 
     rio_readinitb(&rio, fd);
     sprintf(buf, "GET %s HTTP/1.0\r\n\r\n", redirFile);
     rio_writen(fd, buf, strlen(buf));
-/*    printf("done.\n"); */
 
-/*    printf("Reading object response...");
-    fflush(stdout); */
     while(rio_readlineb(&rio, resp, MAXLINE) > 0);
-/*    printf("done.\n"); */
 
-/*    printf("Closing connection...");
-    fflush(stdout); */
     close(fd);
-/*    printf("done.\n"); */
 
     file += FILES_STEP;
     strcpy(hostname, argv[1]);
