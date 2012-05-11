@@ -1,0 +1,1 @@
+mpirun --prefix /usr/lib64/openmpi/ --mca btl_tcp_if_include eth0  -np N --hostfile hosts -- program

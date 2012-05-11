@@ -1,0 +1,9 @@
+Things to tweak for performance increases:
+  Elasticity thresholds
+  Cache size and object size thresholds
+  Nature of the workload to make more favorable to caching
+  Blocking vs. nonblocking communication
+  Redirection and sleep timing, including select() - Make use of a
+    negative value from gettime() to compare against.
+  
+  
