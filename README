@@ -1,0 +1,3 @@
+This is a distributed, dynamically load-balanced, elastic, caching web server in MPI. The server system is capable of using an arbitrary number of machines.
+
+Run ./perform to do a 24 minute performance test.
